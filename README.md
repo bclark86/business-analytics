@@ -38,19 +38,19 @@ My recommended solutions are intended to deliver quick value for the organizatio
 </thead>
 <tbody>
 <tr class="odd">
-<td align="center"><a href="https://github.com/bclark86/business-analytics/blob/master/reports/CharlesBookClub/CharlesBookClub.md">Charles Book Club Marketing Test</a> (R)</td>
+<td align="center"><a href="https://github.com/bclark86/business-analytics/blob/master/CharlesBookClub/CharlesBookClub.md">Charles Book Club Marketing Test</a> (R)</td>
 <td align="center">Increasing efficiency of direct marketing activities</td>
 <td>naive Bayes, logistic regression</td>
 <td>2018-07-23</td>
 </tr>
 <tr class="even">
-<td align="center"><a href="https://github.com/bclark86/business-analytics/blob/master/reports/GermanCredit/GermanCredit.md">German Credit</a> (R)</td>
+<td align="center"><a href="https://github.com/bclark86/business-analytics/blob/master/GermanCredit/GermanCredit.md">German Credit</a> (R)</td>
 <td align="center">Triaging loan applications for review</td>
 <td>logistic regression, k-nn, classification trees, neural nets, random forest, gradient boosting</td>
 <td>2018-07-29</td>
 </tr>
 <tr class="odd">
-<td align="center"><a href="TBD">Tayko Software Catalog</a> (python)</td>
+<td align="center"><a href="https://github.com/bclark86/business-analytics/blob/master/TakyoSoftwareCataloger/takyo.ipynb">Tayko Software Catalog</a> (python)</td>
 <td align="center">Scoring customers to increase marketing effectiveness</td>
 <td>logistic regression, ols regression</td>
 <td>2019-02-24</td>
