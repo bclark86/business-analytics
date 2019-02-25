@@ -1,0 +1,33 @@
+﻿Variable Name,Description,Variable Type
+OBS#,Observation No.,Categorical
+CHK_ACCT,Checking account status,Categorical
+DURATION,Duration of credit in months,Numerical
+HISTORY,Credit history,Categorical
+NEW_CAR,Purpose of credit,Binary
+USED_CAR,Purpose of credit,Binary
+FURNITURE,Purpose of credit,Binary
+RADIO/TV,Purpose of credit,Binary
+EDUCATION,Purpose of credit,Binary
+RETRAINING,Purpose of credit,Binary
+AMOUNT,Credit amount,Numerical
+SAV_ACCT,Average balance in savings account,Categorical
+EMPLOYMENT,Present employment since,Categorical
+INSTALL_RATE,Installment rate as % of disposable income,Numerical
+MALE_DIV,Applicant is male and divorced,Binary
+MALE_SINGLE,Applicant is male and single,Binary
+MALE_MAR_WID,Applicant is male and married or a widower,Binary
+CO-APPLICANT,Application has a co-applicant,Binary
+GUARANTOR,Applicant has a guarantor,Binary
+PRESENT_RESIDENT,Present resident since - years,Categorical
+REAL_ESTATE,Applicant owns real estate,Binary
+PROP_UNKN_NONE,Applicant owns no property (or unknown),Binary
+AGE,Age in years,Numerical
+OTHER_INSTALL,Applicant has other installment plan credit,Binary
+RENT,Applicant rents ,Binary
+OWN_RES,Applicant owns residence,Binary
+NUM_CREDITS,Number of existing credits at this bank,Numerical
+JOB,Nature of job,Categorical
+NUM_DEPENDENTS,Number of people for whom liable to provide maintenance,Numerical
+TELEPHONE,Applicant has phone in his or her name,Binary
+FOREIGN,Foreign worker,Binary
+RESPONSE,Credit rating is good,Binary

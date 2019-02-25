@@ -1,0 +1,953 @@
+---
+title: "German Credit Decision Support"
+author: "Bryan Clark"
+output:
+   html_document:
+      self_contained: false
+      toc: true
+      keep_md: true
+---
+
+```{r setup, include = FALSE}
+library(knitr)
+library(kableExtra)
+opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Executive Summary
+
+To process loan applications in a more efficient manner and understand factors of good credit vs. bad credit, we apply various machine learning algorithms to a dataset that has been manually evaluated by expert decision-makers. Through this process, we are able to build a predictive model to assess the probability an application will be good or bad. We then use the expected value of accepting good or bad applications to guide a recommended process for auto-accepting, auto-rejecting, or manually reviewing applications. Our process allows us to review applications at the extreme ends of the spectrum quicker, and then use the outcomes of a manual review process to further improve our model. We are able to achieve a better customer experience and reduced cost to review applications. 
+
+## Understand
+
+**Business Background**
+
+German Credit is a money-lending organization that provides loans to its customers. Humans review the applications and provide a recommendation for credit using information they have collected from the customer. Upon review, the decision maker evaluates if the customer has "good credit" or "bad credit" and uses that determination to accept or reject the application.
+
+**Business Problem & Analytics Solution**
+
+The current process for German Credit to review applications and respond to the customer takes a lot of time. The decision maker needs to acquire any relevant data from its database on the customer (if they are a current customer of the instituion), review the status of the application, and then get together as a panel to decide whether to move forward with the application. 
+
+The current process takes a week to complete, but German Credit has received feedback from customers and internal research that speed of approval is very important to the customer satisfaction level as customers would like to be able to action on their use of the loan quicker. German Credit believes that being able to decrease the turnaround time (TAT) of loan applications will increase the retention rate of its loan services. 
+
+There are two methods being explored to increase the TAT of the loan application process. First, the decision makers have agreed upon a set of variables that inform their decision process. A data pipeline has been created to provide them with access to relevant data on the application without the need for them to track it down from various places. Second, we will explore using machine learning to model their decision-making criteria. The output of this model will be used to determine current factors decision makers rely on the most when making their decisions and to score future applications in an effort to "auto-accept" customers with good credit. 
+
+To assist in the development of the decision support model, a panel of decision makers have scored a sample of 1000 applications with "good credit" or "bad credit" using 30 variables from the customer's application and any current dealings with German Credit. 
+
+Lastly, German Credit have provided the cost/benefit of the application process. 
+
+  * Accepting an application for good credit -- +100
+  * Accepting an application for bad credit -- -500
+  
+The goal for the analytics product will be to develop a predictive model to use in place of the current application process. We will factor in the cost/benefit of predictions to select the model that maximizes expected profit. Based on model performance, we will recommend a cut off point for triaging applications between "auto-accept", "needs review", and "auto-reject". 
+
+
+## Theorize
+
+Based on the problem at hand, our task will be to use the set of decision criteria to see if we can accurately replicate the current decision maker's process. The goal is to operationalize their expert opinion to increase the speed of the application process, increase the throughput of applications, and reduce the costs associated with reviewing applications. Each of these business goals are believed to have a positive impact on overall customer satisfaction which should increase customer retention. 
+
+### Dataset
+
+Below we will explore the dataset of applications and determine the feasibility of a solution. The variables represent applicant information such as the purpose of their credit, past dealings with the bank, various financial information, and other administrative information about the customer. 
+
+Most interesting, it appears this dataset is entirely male based on the variables described as "Applicant is male and [insert relationship stats]". This is important to note as if this project moves forward, we will need to consdier building an additional model to account for a different population of applicants and performance may suffer. 
+
+```{r echo = FALSE}
+# load packages
+library(caret)
+library(xgboost)
+library(tidyverse)
+library(vcd)
+library(lattice)
+library(reshape2)
+library(ROCR)
+```
+
+```{r}
+# load data definitions provided
+definitions <- read_csv("data/DataDescription.csv")
+
+# display in table
+kable(definitions, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+### Exploratory Data Analysis
+
+First we will pre-process our variables based on our data definitions provided. In some cases we truncate the label for plotting purposes. 
+
+```{r}
+# load our dataset
+credit <- read_csv("data/GermanCredit.csv")
+
+# convert categorical variables to factors with their labels
+credit$CHK_ACCT <- factor(credit$CHK_ACCT, 
+                          labels = c("< 0", "0 - <200", "200+", "None"))
+credit$HISTORY <- factor(credit$HISTORY, 
+                         labels = c("none", "current", "existing current", 
+                                    "previous delays", "critical account"))
+credit$SAV_ACCT <- factor(credit$SAV_ACCT, 
+                          labels = c("<100", "100 - <500", 
+                                     "500 - <1000", "1000+", 
+                                     "unknown/none"))
+
+credit$EMPLOYMENT <- factor(credit$EMPLOYMENT, 
+                            labels = c("unemployed", "<1 year", 
+                                       "1 - <4 years", "4 - <7 years", 
+                                       "7+ years"))
+
+# note the data dictionary shows 3 being >4 years, however that would invalidate this column for the case study
+# in the real world, this discrepancy would need to be addressed
+credit$PRESENT_RESIDENT <- factor(credit$PRESENT_RESIDENT, 
+                                  labels = c("<= 1 year", ">1 - 2 years", ">2 - 3 years", ">3 years"))
+
+credit$JOB <- factor(credit$JOB, 
+                     labels = c("none/NA", #"unemployed/unskilled - non-resident",
+                                "low", #"unskilled - resident",
+                                "medium", #"skilled employee / official",
+                                "high")) #management/ self-employed/ highly qualified employee/ officer"))
+
+credit$RESPONSE <- factor(credit$RESPONSE, 
+                          labels = c("Bad", "Good"))
+
+credit <- credit %>%
+  rename(RADIO_TV = `RADIO/TV`, 
+         CO_APPLICANT = `CO-APPLICANT`)
+
+credit.obs <- credit$`OBS#`
+
+credit <- subset(credit, select = -`OBS#`)
+```
+
+Before we partition our data into a training and test set for modeling, let's first ensure we don't have any holes we'll need to account for. 
+
+```{r}
+# create function to run summary on numeric features
+df_num_summary <- function(df, cols = NULL) {
+
+  if (is.null(cols)) {
+    num.cols <- colnames(select_if(df, is.numeric))
+  } else {
+    num.cols <- cols
+  }
+
+  df <- subset(df, select = num.cols)
+
+    df.num.summmary <- data.frame(
+      Count = round(sapply(df, length), 2),
+      Miss = round((sapply(df, function(x) sum(length(which(is.na(x)))) / length(x)) * 100), 1),
+      Card. = round(sapply(df, function(x) length(unique(x))), 2),
+      Min. = round(sapply(df, min, na.rm = TRUE), 2),
+      `25 perc.` = round(sapply(df, function(x) quantile(x, 0.25, na.rm = TRUE)), 2),
+      Median = round(sapply(df, median, na.rm = TRUE), 2),
+      Mean = round(sapply(df, mean, na.rm = TRUE), 2),
+      `75 perc.` = round(sapply(df, function(x) quantile(x, 0.75, na.rm = TRUE)), 2),
+      Max = round(sapply(df, max, na.rm = TRUE), 2),
+      `Std Dev.` = round(sapply(df, sd, na.rm = TRUE), 2)
+    ) %>%
+      rename(`1st Qrt.` = X25.perc.,
+             `3rd Qrt.` = X75.perc.,
+             `Miss Pct.` = Miss)
+
+    return(df.num.summmary)
+}
+
+# create function to run summary on categorical features
+df_cat_summary <- function(df, cols = NULL) {
+
+  if (is.null(cols)) {
+    cat.cols <- colnames(select_if(df, is.factor))
+  } else {
+    cat.cols <- cols
+  }
+
+  df <- subset(df, select = cat.cols)
+
+  df.cat.summary <- data.frame(
+     Count = round(sapply(df, length), 2),
+     Miss = round(sapply(df, function(x) sum(length(which(is.na(x)))) / length(x)), 2),
+     Card. = round(sapply(df, function(x) length(unique(x))), 2),
+     Mode = names(sapply(df, function(x) sort(table(x), decreasing = TRUE)[1])),
+     Mode_Freq = sapply(df, function(x) sort(table(x), decreasing = TRUE)[1]),
+     Mode_pct = round((sapply(df, function(x) sort(table(x), 
+                                                   decreasing = TRUE)[1] / length(x)) * 100), 1),
+     Mode_2 = names(sapply(df, function(x) sort(table(x), decreasing = TRUE)[2])),
+     Mode_Freq_2 = sapply(df, function(x) sort(table(x), decreasing = TRUE)[2]),
+     Mode_pct_2 = round((sapply(df, function(x) sort(table(x), 
+                                                     decreasing = TRUE)[2] / length(x)) * 100), 1)
+       )
+
+  df.cat.summary$Mode <- gsub("^.*\\.","", df.cat.summary$Mode)
+  df.cat.summary$Mode_2 <- gsub("^.*\\.","", df.cat.summary$Mode_2)
+
+  df.cat.summary <- df.cat.summary %>% 
+    rename(`Miss Pct.` = Miss,
+           `Mode Freq.` = Mode_Freq, 
+           `Mode Pct.` = Mode_pct,
+           `2nd Mode` = Mode_2,
+           `2nd Mode Freq.` = Mode_Freq_2, 
+           `2nd Mode Pct.` = Mode_pct_2
+           )
+
+    return(df.cat.summary)
+}
+```
+
+We do not see any missing values from our numeric variables. Our `DURATION` and `AMOUNT` variables appear to be right skewed. We may need to account for potential outliers for the `AMOUNT` variable. 
+
+```{r}
+credit.num.summary <- df_num_summary(df = credit)
+
+# display in table
+kable(credit.num.summary, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+We do not have any missing categorical variables. We see no variable has a level greater than 5. 
+
+```{r}
+credit.cat.summary <- df_cat_summary(df = credit)
+
+# display in table
+kable(credit.cat.summary, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+Before plotting plotting the distributions of our variables, we will partition our data into a train and test set. The training set will use 80% of our total records and we will use cross-validation to tune our models. The test set will be saved for later to help guide the recommendations for model selection and deployment. 
+
+```{r}
+# set random seed for reproducibility
+set.seed(123)
+
+# create 80/20 split of train and test data indices
+trainIndex <- createDataPartition(credit$RESPONSE, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+# create partitions
+credit.train <- credit[trainIndex, ]
+credit.valid <- credit[-trainIndex, ]
+```
+
+```{r}
+# set theme
+theme_set(theme_classic())
+
+# add colorblind-friendly palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+After partitioning our data, we will just be using the training set to identify opportunities in developing our model. 
+
+**Summary Statistics**
+
+```{r}
+credit.train.num.summary <- df_num_summary(df = credit.train)
+
+# display in table
+kable(credit.train.num.summary, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+```{r}
+credit.train.cat.summary <- df_cat_summary(df = credit.train)
+
+# display in table
+kable(credit.train.cat.summary, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+**Plots**
+
+*Continuous Features*
+
+The `DURATION` distributions confirm a right-skewed distribution. Additionally, it appears Bad credit is associated with longer credit durations. 
+
+```{r}
+# duration
+ggplot(credit.train, aes(x = DURATION)) +
+  geom_histogram(aes(y =..density..), color = "black", fill = "grey", binwidth = 1) +
+  geom_density(fill= "grey", alpha = 0.4)
+
+ggplot(credit.train, aes(x = DURATION, fill = RESPONSE)) +
+  #geom_histogram(aes(y =..density..), color = "black", position = "identity", binwidth = 1, alpha = 0.5) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+
+ggplot(credit.train, aes(x = RESPONSE, y = DURATION, fill = RESPONSE)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+```
+
+The `AMOUNT` variable is also right-skewed with Bad credit showing slightly larger credit amounts. 
+
+```{r}
+# amount
+ggplot(credit.train, aes(x = AMOUNT)) +
+  geom_histogram(aes(y =..density..), color = "black", fill = "grey", binwidth = 100) +
+  geom_density(fill= "grey", alpha = 0.4)
+
+ggplot(credit.train, aes(x = AMOUNT, fill = RESPONSE)) +
+  #geom_histogram(aes(y =..density..), color = "black", position = "identity", binwidth = 250, alpha = 0.5) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+
+ggplot(credit.train, aes(x = RESPONSE, y = AMOUNT, fill = RESPONSE)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+```
+
+The age of applicants tends to be lower for Bad credit labels compared to Good credit labels. 
+
+```{r}
+# age
+ggplot(credit.train, aes(x = AGE)) +
+  geom_histogram(aes(y =..density..), color = "black", fill = "grey", binwidth = 2) +
+  geom_density(color = "grey", alpha = 0.4)
+
+ggplot(credit.train, aes(x = AGE, fill = RESPONSE)) +
+  #geom_histogram(aes(y =..density..), color = "black", position = "identity", binwidth = 2, alpha = 0.5) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+
+ggplot(credit.train, aes(x = RESPONSE, y = AGE, fill = RESPONSE)) +
+  geom_boxplot() +
+  coord_flip() +
+  scale_fill_manual(values = c(cbPalette[7], cbPalette[4]))
+```
+
+*Binary Features*
+
+In plotting binary features by our target, `NEW_CAR`, `USED_CAR`, and `RENT` display interesting variability in seperating the target feature. 
+
+```{r}
+bin.vars <- c("NEW_CAR", "USED_CAR", "FURNITURE", "RADIO_TV", "EDUCATION", "RETRAINING",
+          "MALE_DIV", "MALE_SINGLE", "MALE_MAR_or_WID", 
+          "CO_APPLICANT", "GUARANTOR", "REAL_ESTATE", "PROP_UNKN_NONE", "OTHER_INSTALL",
+          "RENT", "OWN_RES", "TELEPHONE", "FOREIGN")
+
+for (var in bin.vars) {
+  
+  form <- as.formula(paste("~ ", var, "+ RESPONSE"))
+  
+  mosaicplot(form, data = credit.train,
+             col = c(cbPalette[7], cbPalette[4]),
+             cex.axis = 0.45,
+             xlab = var,
+             main = "")
+}
+
+```
+
+
+*Categorical Features*
+
+In reviewing the distributions of our categorical variables compared to the target variable, `CHK_ACCT` stands out as a potentially important variable. 
+
+```{r}
+cat.vars <- c("CHK_ACCT", "HISTORY", "SAV_ACCT", "EMPLOYMENT", "INSTALL_RATE", 
+          "PRESENT_RESIDENT", "NUM_CREDITS", "JOB", "NUM_DEPENDENTS")
+
+for (var in cat.vars) {
+  
+  form <- as.formula(paste("~ ", var, "+ RESPONSE"))
+  
+  mosaicplot(form, data = credit.train,
+             col = c(cbPalette[7], cbPalette[4]),
+             cex.axis = 0.45,
+             xlab = var,
+             main = "")
+}
+```
+
+*Multivariate Analysis*
+
+In reviewing correlations of our numeric variables, we see a strong negative correlation between `OWN_RES` and `RENT`, which is unsurprising. `DURATION` and `AMOUNT` also show a positive correlation.
+
+```{r}
+
+drop.vars <- c("CHK_ACCT", "HISTORY", "SAV_ACCT", "EMPLOYMENT", "INSTALL_RATE", 
+          "PRESENT_RESIDENT", "NUM_CREDITS", "JOB", "NUM_DEPENDENTS")
+
+# isolate variables for correlation
+credit.corr <- credit.train %>%
+  select(-one_of(drop.vars)) %>%
+  mutate(RESPONSE = ifelse(RESPONSE == "Good", 1, 0))
+
+# create correlation matrix
+cor.mat <- round(cor(credit.corr), 2)
+melted.cor.mat <- melt(cor.mat)
+
+# plot correlation heatmap
+ggplot(melted.cor.mat, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "red", high = "blue", mid = "white",
+                       name = "Pearson Correlation") +
+  labs(title = "German Credit Correlation Heatmap") +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 1.5) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank(), axis.title.y = element_blank())
+```
+
+When comparing the mean values of `DURATION`, `AMOUNT`, and `AGE` across Bad and Good credit, we see statistically significant differences. These will most likely be important variables to separate our classes. 
+
+```{r}
+credit.mean <- credit.train %>%
+  select(DURATION, AMOUNT, AGE, RESPONSE)
+
+categories <- colnames(credit.mean)
+
+credit.ttest <- data.frame(Category = categories[1:3], 
+                                 p_value = rep(0,3))
+
+
+# loop to run through each variable for ttest
+for (i in 1:nrow(credit.ttest)) {
+
+  var <- categories[i]
+  
+  p <- t.test(get(var) ~ RESPONSE, data = credit.mean)$p.value
+  
+  credit.ttest[i, 2] <- round(p, 4)
+}
+
+# display in table
+kable(credit.ttest, type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+
+Testing the proportions of our binary variables shows some potentially significant differences for variables `OWN_RES`, `PROP_UNKN_NONE`, `OTHER_INSTALL`, and some others. We are running multiple tests, so there are likely false positives in our test results. 
+
+```{r}
+credit.prop <- credit.train %>%
+  select(-DURATION, -AMOUNT, -INSTALL_RATE, -AGE, -NUM_CREDITS, 
+         -NUM_DEPENDENTS, -CHK_ACCT, -HISTORY, -SAV_ACCT, -EMPLOYMENT, 
+         -PRESENT_RESIDENT, -JOB)
+
+categories <- colnames(credit.prop)
+
+credit.prop.test <- data.frame(Category = categories[1:18], 
+                                 p_value = rep(0,18))
+
+
+# loop to run through each variable for ttest
+for (i in 1:nrow(credit.prop.test)) {
+
+  var <- categories[i]
+  
+  dat <- credit.prop %>% select(RESPONSE, var)
+  
+  test.table <- table(dat)
+  test.table <- test.table[ , c(2, 1)]
+  
+  p <- prop.test(test.table)$p.value
+  
+  credit.prop.test[i, 2] <- round(p, 4)
+}
+
+# display in table
+credit.prop.test %>%
+  arrange(p_value) %>%
+  kable(type = "html") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "left", 
+                latex_options = "scale_down")
+```
+
+
+## Prototype
+
+Before moving forward with prototyping various models, we want to first remove predictors that have near zero variance in the training sample. These are variables that are likely to be uninformative for our modeling. We see two variables have been removed due to low variance. 
+
+```{r}
+# remove variables with low variance
+nzv <- nearZeroVar(credit.train)
+credit.train <- credit.train[ , -nzv]
+credit.valid <- credit.valid[ , -nzv]
+
+print(nzv)
+```
+
+The first model we build is a logistic regression using all of the remaining variables. Using a 10-fold repeated cross-validation, we produce an accuracy of about 75%. This is an improvement above the baseline of 70%, which is the proportion of Good samples in our dataset. We use the Box-Cox transformation to handle any skewness of our variables. 
+
+```{r}
+# add controls for training model
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE
+                     #summaryFunction = twoClassSummary
+                     )
+
+# set seed to compare models
+set.seed(123)
+
+glm.all <- train(RESPONSE ~ ., data = credit.train,
+              method = "glm",
+              #metric = "ROC",
+              preProc = c("BoxCox"),
+              trControl = ctrl)
+
+glm.all
+```
+
+Using our initial logistic model, we use backwards stepwise selection to preduce our predictors. This produces a mild improvement in our accuracy while reducing our model to 18 predictors. 
+
+```{r}
+glm.all.step <- glm(RESPONSE ~ ., data = credit.train, family = "binomial")
+glm.step.back <- step(glm.all.step, direction = "backward", trace = 0)
+
+# set seed to compare models
+set.seed(123)
+
+glm.back <- train(glm.step.back$formula, data = credit.train,
+              method = "glm",
+              #metric = "ROC", 
+              preProc = c("BoxCox"),
+              trControl = ctrl)
+
+glm.back
+```
+
+Next, we use forward stepwise selection on our logisitc model. This method reduces our model to 17 predictors without much of a difference in performance from our full and backwards logistic models. 
+
+```{r}
+min.model <-  glm(RESPONSE ~ 1, data = credit.train, family = "binomial")
+biggest <- formula(glm( RESPONSE ~ ., data = credit.train, family = "binomial"))
+
+glm.step.for <- step(min.model, direction = "forward", scope = biggest, trace = 0)
+
+# set seed to compare models
+set.seed(123)
+
+glm.for <- train(glm.step.for$formula, data = credit.train,
+              method = "glm",
+              #metric = "ROC",
+              preProc = c("BoxCox"),
+              trControl = ctrl)
+
+glm.for
+```
+
+Next, we increase explore using classification trees with a random search over the parameter grid. In testing 10 different models, we max our accuracy out at around 72%. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+# set seed to compare models
+set.seed(123)
+
+ct <- train(RESPONSE ~ ., data = credit.train,
+            method = "rpart",
+            #metric = "ROC", 
+            trControl = ctrl,
+            tuneLength = 10
+            )
+
+ct
+```
+
+Using a slightly different classification tree method, we max our accuracy out at 72% with a tree depth of 11. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+
+# set seed to compare models
+set.seed(123)
+
+ct2 <- train(RESPONSE ~ ., data = credit.train,
+             method = "rpart2",
+             #metric = "ROC", 
+             trControl = ctrl,
+             tuneLength = 10)
+
+ct2
+```
+
+Next we explore using k-nearest neighbors model across several values of k. We max our accuracy out at 73% using the nearest 47 neighbors. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+
+grid = expand.grid(k = seq(3, 51, 2))
+
+# set seed to compare models
+set.seed(123)
+
+knn <- train(RESPONSE ~ ., data = credit.train,
+            method = "knn",
+            #metric = "ROC", 
+            trControl = ctrl,
+            preProc = c("BoxCox", "center", "scale"),
+            tuneGrid = grid
+            )
+
+knn
+```
+
+Next, we move to more complex models to see if we can improve on our initial logistic model with more "black box" methods. A random search gets us closer with an accuracy of 75%. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+
+# set seed to compare models
+set.seed(123)
+
+nn <- train(RESPONSE ~ ., data = credit.train,
+            method = "nnet",
+            preProc = c("BoxCox", "center", "scale"),
+            #metric = "ROC", 
+            trControl = ctrl,
+            tuneLength = 10,
+            trace = FALSE)
+
+nn
+```
+
+Across a random search of random forest parameters, we produce an accuracy of 74%. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+# set seed to compare models
+set.seed(123)
+
+rf <- train(RESPONSE ~ ., data = credit.train,
+            method = "rf",
+            #metric = "ROC", 
+            trControl = ctrl,
+            tuneLength = 10)
+
+rf
+```
+
+Lastly, we try a boosting model to see if we can increase our accuracy further. A random grid search across 10 models provides us with an accuracy of around 75%. 
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 10,
+                     repeats = 5,
+                     classProbs = TRUE, 
+                     #summaryFunction = twoClassSummary,
+                     search = "random"
+                     )
+# set seed to compare models
+set.seed(123)
+
+xgb <- train(RESPONSE ~ ., data = credit.train,
+            method = "xgbTree",
+            #metric = "ROC", 
+            trControl = ctrl,
+            tuneLength = 10)
+
+xgb
+```
+
+Since we resample the same folds for evaluating our models, we can compare the accuracies of the different tests. Our logistic models show the highest median accuracies. This is benefical as the logistic model will be more transparent in terms of variable importance. 
+
+```{r}
+resamp <- resamples(list(Logistic_all  = glm.all,
+                         Logistic_back = glm.back,
+                         Logistic_for  = glm.for,
+                         CART          = ct,
+                         CART_2        = ct2,
+                         K_NN          = knn,
+                         Neural_Net    = nn,
+                         Random_Forest = rf,
+                         XGBoost       = xgb))
+
+summary(resamp)
+```
+
+```{r}
+model.differences <- diff(resamp)
+
+summary(model.differences)
+```
+
+
+
+```{r}
+bwplot(resamp, main = "Model Metric Comparison")
+```
+
+```{r}
+dotplot(resamp, metric = "Accuracy", main = "Model Accuracy Confidence Intervals")
+```
+
+We can also review the variable importance of each of our models. We see `CHK_ACCT`, `SAV_ACCT`, `AGE`, and `DURATION` are common variables in the top 10 for each model. 
+
+```{r}
+log_back_imp <- varImp(glm.back)
+log_all_imp  <- varImp(glm.all)
+xgb_imp      <- varImp(xgb)
+nn_imp       <- varImp(nn)
+rf_imp       <- varImp(rf)
+```
+
+```{r}
+plot(log_back_imp, top = 10, main = "Backward Stepwise Logistic Regression")
+```
+
+```{r}
+plot(log_all_imp, top = 10, main = "Full Logisitc Regression")
+```
+
+```{r}
+plot(xgb_imp, top = 10, main = "XgBoost")
+```
+
+```{r}
+plot(nn_imp, top = 10, main = "Neural Net")
+```
+
+```{r}
+plot(rf_imp, top = 10, main = "Random Forest")
+```
+
+## Test
+
+Our initial tests show the logistic models perform well in our dataset compared to more complex models. We will use the test set we partitioned to evaluate the expected profits of the backwards logistic regression, gradient boosted, and random forest models. We will refer back to the profit for loans approved to select the best model and make recommendations for reviewing applications. 
+
+As a refresher, for applications that are approved, a Good loan returns +100 in profit, and a Bad loan costs -500 in profit. 
+
+To evaluate our models, we will view the ROC scores of our training and test sets to see how well the classes separate. Then we will determine the optimal cutoff points for probabilities to maximixe separation. 
+
+```{r}
+# function to plot ROC curves from ROCR objects
+plot_roc <- function(train_roc, train_auc, test_roc, test_auc) {
+  
+  plot(train_roc, col = "blue", lty = "solid", main = "", lwd = 2,
+       xlab = "False Positive Rate",
+       ylab = "True Positive Rate")
+  plot(test_roc, col = "red", lty = "dashed", lwd = 2, add = TRUE)
+  abline(c(0,1))
+  # draw legend
+  train.legend <- paste("Training AUC = ", round(train_auc, digits = 3))
+  test.legend <- paste("Test AUC = ", round(test_auc, digits = 3))
+  legend("bottomright", legend = c(train.legend, test.legend),
+         lty = c("solid", "dashed"), lwd = 2, col = c("blue", "red"))
+  
+}
+
+# function to determine optimal cutoff point
+opt.cut <-  function(perf, pred){
+    cut.ind <-  mapply(FUN = function(x, y, p) {
+        d <- (x - 0) ^ 2 + (y - 1) ^ 2
+        ind <-  which(d == min(d))
+        c(sensitivity = y[[ind]], specificity = 1 - x[[ind]], 
+            cutoff = p[[ind]])
+    }, perf@x.values, perf@y.values, pred@cutoffs)
+}
+```
+
+Our logistic regression model produces a decent ROC score with an optimal cutoff probability of 0.67.
+
+```{r}
+# training metrics for backward step logistic regression
+credit.train$log_back_prob <- predict.train(glm.back, 
+                                            newdata = credit.train, 
+                                            type = "prob")[ ,2]
+credit.train.log_back_pred <- prediction(credit.train$log_back_prob, credit.train$RESPONSE)
+credit.train.log_back.auc  <- as.numeric(performance(credit.train.log_back_pred, "auc")@y.values)
+credit.train.roc <- performance(credit.train.log_back_pred, "tpr", "fpr")
+
+# test accuracy for backward step logistic regression
+credit.valid$log_back_prob <- predict.train(glm.back, 
+                                            newdata = credit.valid, 
+                                            type = "prob")[ ,2]
+credit.valid.log_back_pred <- prediction(credit.valid$log_back_prob, credit.valid$RESPONSE)
+credit.valid.log_back.auc  <- as.numeric(performance(credit.valid.log_back_pred, "auc")@y.values)
+credit.valid.roc <- performance(credit.valid.log_back_pred, "tpr", "fpr")
+
+# plot ROC/AUC scores
+plot_roc(train_roc = credit.train.roc,
+         train_auc = credit.train.log_back.auc,
+         test_roc = credit.valid.roc,
+         test_auc = credit.valid.log_back.auc)
+
+print(opt.cut(credit.valid.roc, credit.valid.log_back_pred))
+```
+
+The gradient boosted model drops slightly in performance across the test set compared to the logistic model. This is similar to what we saw in the model building process. 
+
+```{r}
+# training metrics for xgboost model
+credit.train$xgb_prob <- predict.train(xgb, 
+                                       newdata = credit.train, 
+                                       type = "prob")[ ,2]
+credit.train.xgb_pred <- prediction(credit.train$xgb_prob, credit.train$RESPONSE)
+credit.train.xgb.auc  <- as.numeric(performance(credit.train.xgb_pred, "auc")@y.values)
+credit.train.roc <- performance(credit.train.xgb_pred, "tpr", "fpr")
+
+# test accuracy for xgboost model
+credit.valid$xgb_prob <- predict.train(xgb, 
+                                       newdata = credit.valid, 
+                                       type = "prob")[ ,2]
+credit.valid.xgb_pred <- prediction(credit.valid$xgb_prob, credit.valid$RESPONSE)
+credit.valid.xgb.auc  <- as.numeric(performance(credit.valid.xgb_pred, "auc")@y.values)
+credit.valid.roc <- performance(credit.valid.xgb_pred, "tpr", "fpr")
+
+# plot ROC/AUC scores
+plot_roc(train_roc = credit.train.roc,
+         train_auc = credit.train.xgb.auc,
+         test_roc = credit.valid.roc,
+         test_auc = credit.valid.xgb.auc)
+
+print(opt.cut(credit.valid.roc, credit.valid.xgb_pred))
+```
+
+For the random forest, we see it overfits the training set and performs much worse on the test set. Again, the logistic regression still shows the best ROC score. 
+
+```{r}
+credit.valid$rf_prob <- predict.train(rf, 
+                                      newdata = credit.valid, 
+                                      type = "prob")[ ,2]
+
+# training metrics for xgboost model
+credit.train$rf_prob <- predict.train(rf, 
+                                      newdata = credit.train, 
+                                      type = "prob")[ ,2]
+credit.train.rf_pred <- prediction(credit.train$rf_prob, credit.train$RESPONSE)
+credit.train.rf.auc  <- as.numeric(performance(credit.train.rf_pred, "auc")@y.values)
+credit.train.roc <- performance(credit.train.rf_pred, "tpr", "fpr")
+
+# test accuracy for xgboost model
+credit.valid$rf_prob <- predict.train(rf, 
+                                      newdata = credit.valid, 
+                                      type = "prob")[ ,2]
+credit.valid.rf_pred <- prediction(credit.valid$rf_prob, credit.valid$RESPONSE)
+credit.valid.rf.auc  <- as.numeric(performance(credit.valid.rf_pred, "auc")@y.values)
+credit.valid.roc <- performance(credit.valid.rf_pred, "tpr", "fpr")
+
+# plot ROC/AUC scores
+plot_roc(train_roc = credit.train.roc,
+         train_auc = credit.train.rf.auc,
+         test_roc = credit.valid.roc,
+         test_auc = credit.valid.rf.auc)
+
+print(opt.cut(credit.valid.roc, credit.valid.rf_pred))
+```
+
+To confirm our evaluation and guide our recommendations, we can calculate the expected profit of our predictions across each decile of the test set. Looking at the individual profit and cumulative profit provides us insight into where our model produces the most value as well as when we may want human-intervention to take over for the model. 
+
+The gradient boosted model actually peaks out at the highest expected profit through 40% of the predictions ranked by probability. The random forest model performs the best through the first 20% of the test set. Across the entire test sample, the logistic regression provides the highest overall expected profit. Each model performs similar through the final 30% of the test sample. 
+
+```{r}
+# use optimal estimates for each models predictions
+credit.valid$log_back_pred <- factor(ifelse(credit.valid$log_back_prob > 0.67, "Good", "Bad"))
+credit.valid$xgb_pred <- factor(ifelse(credit.valid$xgb_prob > 0.69, "Good", "Bad"))
+credit.valid$rf_pred <- factor(ifelse(credit.valid$rf_prob > 0.61, "Good", "Bad"))
+
+# use predictions to assess expected profit
+credit.valid$log_back_profit <- ifelse(credit.valid$log_back_pred == "Good" & credit.valid$RESPONSE == "Good", 100,
+                                       ifelse(credit.valid$log_back_pred == "Good" & credit.valid$RESPONSE == "Bad", -500, 0))
+
+credit.valid$xgb_profit <- ifelse(credit.valid$xgb_pred == "Good" & credit.valid$RESPONSE == "Good", 100,
+                                  ifelse(credit.valid$xgb_pred == "Good" & credit.valid$RESPONSE == "Bad", -500, 0))
+
+credit.valid$rf_profit <- ifelse(credit.valid$rf_pred == "Good" & credit.valid$RESPONSE == "Good", 100,
+                                 ifelse(credit.valid$rf_pred == "Good" & credit.valid$RESPONSE == "Bad", -500, 0))
+
+# calculate cumulative profit for each model to assess optimal profit for triage cutoff
+logistic.profit <- credit.valid %>%
+  select(log_back_prob, log_back_profit) %>%
+  arrange(desc(log_back_prob)) %>%
+  mutate(model = "Logistic",
+         case = row_number(),
+         profit = log_back_profit,
+         decile = cut(1:n(), breaks = quantile(1:n(), probs = seq(0, 1, .1)), 
+              include.lowest = TRUE,
+              labels = c(10:1))) %>%
+  select(model, case, profit, decile)
+
+xgb.profit <- credit.valid %>%
+  select(xgb_prob, xgb_profit) %>%
+  arrange(desc(xgb_prob)) %>%
+  mutate(model = "XgBoost",
+         case = row_number(),
+         profit = xgb_profit,
+         decile = cut(1:n(), breaks = quantile(1:n(), probs = seq(0, 1, .1)), 
+              include.lowest = TRUE,
+              labels = c(10:1))) %>%
+  select(model, case, profit, decile)
+
+rf.profit <- credit.valid %>%
+  select(rf_prob, rf_profit) %>%
+  arrange(desc(rf_prob)) %>%
+  mutate(model = "Random Forest",
+         case = row_number(),
+         profit = rf_profit,
+         decile = cut(1:n(), breaks = quantile(1:n(), probs = seq(0, 1, .1)), 
+              include.lowest = TRUE,
+              labels = c(10:1))) %>%
+  select(model, case, profit, decile)
+
+# combine expected profit dataframes for plotting
+profit <- rbind(logistic.profit, xgb.profit, rf.profit) %>%
+  group_by(model, decile) %>%
+  summarise(dec_profit = sum(profit)) %>%
+  mutate(profit = cumsum(dec_profit))
+
+# plot expected profit by decile
+ggplot(profit, aes(x = decile, y = dec_profit, group = model, color = model)) +
+  geom_line(aes(linetype = model)) +
+  geom_point(aes(shape = model)) +
+  geom_hline(yintercept = 1, linetype = 2, size = 0.1) +
+  labs(title = "Decile Expected Profit - Test Set", x = "Decile", y = "Profit")
+
+# plot cumulative expected profit by decile
+ggplot(profit, aes(x = decile, y = profit, group = model, color = model)) +
+  geom_line(aes(linetype = model)) +
+  geom_point(aes(shape = model)) +
+  geom_hline(yintercept = 1, linetype = 2, size = 0.1) +
+  labs(title = "Cumulative Expected Profit - Test Set", x = "Decile", y = "Profit")
+```
+
+
+## Implement
+
+If we view the predicted probabilities of Good credit for the logisitc model, we can determine the best way to triage the model's predictions in deployment. We see that our profit is maximized through the top 40% of predicted probabilities for the logisitc regression model. Additionally, our profit remains flat through the last 40%. Using the distribution of the predicted probabilities, we surmise that the model can be used to auto-accept applications with a predicted probability above 80-85% (82% based on our sample) and auto-reject applications with a predicted probability lower than 70-75% (71% for our sample). We can then continue to manually review applications that fall within the two cutoff points. This method will reduce cost to review applications, speed up the process of notifying customers of their status, and allow us to continue to get samples to refine and improve the model. 
+
+```{r}
+sort(quantile(credit.valid$log_back_prob, probs = seq(0, 1, .1)), decreasing = TRUE)
+```
+
+
