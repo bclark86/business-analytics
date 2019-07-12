@@ -3,9 +3,7 @@ title: "German Credit Decision Support"
 author: "Bryan Clark"
 output:
    html_document:
-      self_contained: false
       toc: true
-      keep_md: true
 ---
 
 ```{r setup, include = FALSE}
