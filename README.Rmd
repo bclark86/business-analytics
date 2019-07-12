@@ -33,8 +33,8 @@ My recommended solutions are intended to deliver quick value for the organizatio
 
 |  Case  | Description | Machine Leaning Algorithm(s) | Last Update
 | :----: | :---------: | ---------------------------- | -----------
-| [Charles Book Club Marketing Test](https://github.com/bclark86/business-analytics/blob/master/CharlesBookClub/CharlesBookClub.md) (R) | Increasing efficiency of direct marketing activities | naive Bayes, logistic regression | 2018-07-23
-| [German Credit](https://github.com/bclark86/business-analytics/blob/master/GermanCredit/GermanCredit.md) (R) | Triaging loan applications for review | logistic regression, k-nn, classification trees, neural nets, random forest, gradient boosting | 2018-07-29
+| [Charles Book Club Marketing Test](http://htmlpreview.github.io/?https://github.com/bclark86/business-analytics/blob/master/CharlesBookClub/CharlesBookClub.html) (R) | Increasing efficiency of direct marketing activities | naive Bayes, logistic regression | 2018-07-23
+| [German Credit](http://htmlpreview.github.io/?hhttps://github.com/bclark86/business-analytics/blob/master/GermanCredit/GermanCredit.html) (R) | Triaging loan applications for review | logistic regression, k-nn, classification trees, neural nets, random forest, gradient boosting | 2018-07-29
 | [Tayko Software Catalog](https://github.com/bclark86/business-analytics/blob/master/TakyoSoftwareCataloger/takyo.ipynb) (Python) | Scoring customers to increase marketing effectiveness | logistic regression, linear regression | 2019-02-24
 | [Political Persuasion](http://htmlpreview.github.io/?https://github.com/bclark86/business-analytics/blob/master/PoliticalPersuasion/PoliticalPersuasion_BSPF.html) (R / Python) | Uplift modeling to target voters for vote-swaying | H2O AutoML (Gradient Boosted Machine) | 2019-07-12
 
