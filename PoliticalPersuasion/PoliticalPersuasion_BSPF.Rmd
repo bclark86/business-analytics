@@ -1,0 +1,599 @@
+---
+title: "Political Persuasion"
+author: "Bryan Clark"
+date: "7/12/2019"
+output: 
+  html_document:
+    highlight: default
+    theme: cosmo
+    toc: true
+    toc_float: true
+    df_print: tibble
+---
+
+```{r setup, include = FALSE}
+# customize output options 
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 6, fig.asp = 0.618, out.width = "70%", 
+                      fig.align = "center")
+
+# helpers
+library(tidyverse)
+library(janitor)
+library(glue)
+library(cowplot)
+
+# modeling
+library(recipes)
+library(rsample)
+library(h2o)
+
+# python integration
+library(reticulate)
+use_condaenv("businessAnalytics")
+
+# set theme for plots
+theme_set(theme_minimal(base_family = "Avenir"))
+
+# color-blind palette
+cb_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+                "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+# Political Persuasion
+
+## Business Problem Introduction
+
+**Background**
+
+The following case study centers around the idea of political targeting to sway voter opinion using campaign marketing. Similar to identifying a customer's propensity to purchase and targeting them with marketing communication, the general goal it to create a predictive model to understand propensity to "respond" to a political targeting campaign. However, just modeling propensity may not be sufficient enough, as a customer or voter may have already been likely to respond in the absence of marketing. 
+
+In this ficticious case study, an experiment consisted of the following steps:
+
+1. Conduct a pre-survey of the voters to determine their inclination to vote Democratic
+2. Randomly split the into two samples -- control and treatment
+3. Send a flyer promoting the Democratic candidate to the treatment group
+4. Conduct another survey of the voters to determine their inclination to vote Democratic
+
+The campaign has limited resources and wants to optimize their next sendout to the top 10% of voters. The goal of this project will be to use machine learning to maximize the effectiveness of the next campaign.  
+
+**Data**
+
+Data for this case consists of a variables to indicate if a voter's opinion moved in favor of the Democratic candidate as well as if they recevied the treatment flyer. Additional variables come from a variety of sources:
+
+1. Government voter files
+2. Political party files
+3. Commerical consumer and demogrpahic data
+4. Census neighborhood data
+
+A complete data dictionary has not been provided, so we will initially start with only a subset of variables provided. If possible, we would also consult with the data provided to understand the data definitions and determine the appropriateness for modeling. 
+
+For the sake of this case, let's assume it costs \$5.00 per voter targeted (includes all postage, and labor costs). The next campaign will be targeting 100,000 people. 
+
+**Objective and Key Results:**
+
++ Objective: Maximize the effectiveness of the campaign. 
++ Key Result: Develop a model to maximize the lift of voters in the top 10% of the test set. 
+
+## Understand
+
+### 1. View the Business as a Machine
+
+#### 1.1 Isolate the Business Unit
+
+For this case study, the business unit interaction is between the marketing department and the voters.
+
+#### 1.2 Define Objectives
+
+The objective is to target voters that are most likely to be influenced by the marketing collateral. Since there are people that may already be likely to move in favor of the Democratic candidate, we will want to score customers on their `uplift`. This will be calculated as `P(response | Flyer == 1) - P(response | Flyer == 0)`. 
+
+#### 1.3 Collect Outcomes
+
+The only outcome we have so far is the result of the experiment used to collect data for modeling. We will use the initial effectiveness of the experiment as a baseline for our modeling. 
+
+### 2. Understand the Drivers
+
+#### 2.1 Investigate Objectives
+
+The secondary objective is to become more prudent with the marketing budget and target the right voters. It is believed that the flyer is effective at swaying voter opinion (main objective), but we will confirm this effectiveness in the analysis and use it as a benchmark for performance. 
+
+#### 2.2 Synthethize Outcomes
+
+There is currently no other process in place other than to send collateral to all the voters possible. We currently do not know who the best voters to target would be. 
+
+In targeting only 10%, we would only be able to target voters at random, or perhaps based on an attribute such as being a supporter of another political party. 
+
+#### 2.3 Hypothethize Drivers
+
+There are many factors that could go into a voter being swayed. The age and gender of the voter could play a part. As mentioned above, the political party affilitation or what they voted in the last election could play major roles. Additionally, demographic  and behavioral information of the person and/or their neighborhood could provide insight into their potential to be influenced. 
+
+Since we are uncertain about many of the variables, we will focus on `age`, `gender`, `household`, and `neighborhood` variables along with the `flyer` and response variable (`moved_a`). 
+
+This initial model will also act as a baseline for improvement as we learn more about the available variables. 
+
+### 3. Measure the Drivers
+
+#### 3.1 Collect Data
+
+We will analyze the dataset provided to us by the case study. 
+
+```{r}
+# import python file to read data and create summary report
+source_python("voters.py")
+
+voters <- read_voters("data/raw/Voter-Persuasion_0.csv", report = FALSE)
+```
+
+We then select the columns of interest. 
+
+```{r}
+# columns for modeling
+model_cols = c(
+    # demographics
+    'AGE', 'GENDER_F', 'HH_ND', 'HH_NR', 'HH_NI', 'MED_AGE', 
+    'NH_WHITE', 'NH_AA', 'NH_ASIAN', 'NH_MULT', 'REG_DAYS', 'MED_HH_INC',
+    # party affiliation
+    'PARTY_D', 'PARTY_I', 'PARTY_R',
+    # not sure what these are, but they appear to do with voting
+    'VG_04', 'VG_08', 'VG_10', 'VG_12',
+    'VPP_08', 'VPP_12',
+    'VPR_08', 'VPR_10', 'VPR_12',
+    # flyer & response
+    'MESSAGE_A', 'MOVED_A'
+)
+
+# create modeling tibble in R
+voters_tbl <- voters %>%
+  as.tibble() %>%
+  select(model_cols) %>%
+  rename("FLYER" = "MESSAGE_A",
+         "RESPONSE" = "MOVED_A") %>%
+  # lower-case variable names
+  clean_names()
+
+# remove unnecessary data
+rm(voters)
+```
+
+#### 3.2 Develop KPIs
+
+First, we want to see how the flyer and no flyer groups performed in terms of response rates. We see that the flyer appears to have had an impact in swaying more voters. 
+
+```{r}
+voters_tbl %>%
+  group_by(flyer) %>%
+  summarize(response_rate = mean(response))
+```
+
+
+```{r}
+# calculate response rate difference between flyer and no flyer groups
+obs_diff <- voters_tbl %>%
+  group_by(flyer) %>%
+  summarize(response_rate = mean(response)) %>%
+  summarize(stat = diff(response_rate)) %>%
+  pull()
+
+print(glue("Observed Flyer Response Rate Effect: {obs_diff * 100}%"))
+```
+
+```{r}
+library(infer)
+
+# simulate null universe
+null_distn <- voters_tbl %>%
+  mutate(flyer = factor(flyer),
+         response = factor(response)) %>%
+  specify(response ~ flyer, success = "1") %>%
+  hypothesize(null = "independence") %>%
+  generate(reps = 10000, type = "permute") %>%
+  calculate(stat = "diff in props", order = c("1", "0"))
+
+# calculate p-value
+p_val <- null_distn %>%
+  summarize(p_value = mean(stat >= abs(obs_diff))) %>%
+  pull()
+
+p_val_label <- ifelse(p_val == 0,
+                      "less than 0.01%",
+                      paste0(p_val * 100, "%"))
+
+# plot simulation
+ggplot(null_distn, aes(x = stat)) +
+  geom_histogram(color = "black", fill = cb_palette[1]) +
+  geom_vline(xintercept = obs_diff, color = "red", linetype = "dashed") +
+  labs(
+    title = "Simulation of Response Rate Difference",
+    subtitle = glue("Probability of observed difference due to random chance: ",
+                    p_val_label),
+    x = "Response Rate Difference",
+    y = "Simulation Trials",
+    caption = "Source: Simulation Results"
+  )
+```
+
+We see that about a 6% absolute difference between the flyer group and the no flyer group. Furthermore, the difference is significant in the sense it is very unlikely to have been caused by random chance. Since the two groups were randomly sampled for the experiment, we are able to confirm sending the flyer increases the likelihood for a voter to be swayed democrat. This is a good insight that can be reported back to the stakeholders. 
+
+The KPI we will focus on is a *cost per vote* KPI. We define this as the cost of the campaign divided by the number of votes it swayed. We will compare the *cost per vote* of the test group to the estimated *cost per vote* of the top 10% targeted group to quantify the value of the voter-targeting model. 
+
+```{r}
+# assumes total cost of flyer distribution is $2 per voter
+FLYER_COST <- 2
+
+calculate_cpv <- function(sends, flyer_effect, flyer_cost = FLYER_COST) {
+  
+  # total cost divided by votes added
+  cpv <- (flyer_cost * sends) / (sends * flyer_effect)
+  
+  return(cpv)
+}
+
+flyer_group <- voters_tbl %>% 
+  filter(flyer == 1) %>% 
+  select(response)
+
+flyer_cpv <-  calculate_cpv(nrow(flyer_group), 
+                            obs_diff) %>% round(2)
+
+print(glue("Flyer Baseline Cost Per Vote: ${flyer_cpv}"))
+```
+
+## Explore
+
+### 4. Uncover Problems and Opportunities
+
+#### 4.1 Evaluate Baseline Performance
+
+Based on the results of the initial experiment, we can calcuate our baseline performance of sending the flyer to 100,000 voters at random.
+
+```{r}
+FLYERS_N <- 100000
+
+baseline_cost <- FLYER_COST * FLYERS_N
+baseline_added_votes <- FLYERS_N * obs_diff
+
+
+print(glue("Expected Cost: ${format(baseline_cost, scientific = F)}"))
+print(glue("Expected Votes Added: {baseline_added_votes}"))
+print(glue("Expected Cost Per Vote: ${flyer_cpv}"))
+```
+
+If we target the next 100k voters at random, we can expect to add about 5,800 additional votes. In the real-world, we should check with the stakeholders to understand what performance is necessary to win the election. 
+
+#### 4.2 Highlight Potential Problem Areas
+
+```{r out.width="120%"}
+plot_hist_facet <- function(data, fct_reorder = FALSE, fct_rev = FALSE, 
+                            bins = 10, fill = "black", 
+                            color = "white", ncol = 5, scale = "free") {
+    
+    data_factored <- data %>%
+        mutate_if(is.character, as.factor) %>%
+        mutate_if(is.factor, as.numeric) %>%
+        gather(key = key, value = value, factor_key = TRUE) 
+    
+    if (fct_reorder) {
+        data_factored <- data_factored %>%
+            mutate(key = as.character(key) %>% as.factor())
+    }
+    
+    if (fct_rev) {
+        data_factored <- data_factored %>%
+            mutate(key = fct_rev(key))
+    }
+    
+    g <- data_factored %>%
+        ggplot(aes(x = value, group = key)) +
+        geom_histogram(bins = bins, fill = fill, 
+                       color = color, alpha = 3/4) +
+        facet_wrap(~ key, ncol = ncol, scale = scale) +
+        labs(x = "", y = "")
+    
+    return(g)
+    
+}
+
+plot_hist_facet(voters_tbl, ncol = 6)
+```
+
+```{r out.width="120%"}
+voters_tbl %>%
+  group_by(response) %>%
+  summarise_all(mean) %>%
+  gather(-response, 
+         key = key, value = value, factor_key = TRUE) %>%
+  ggplot(aes(key, value, fill = factor(response))) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ key, ncol = 7, scale = "free") +
+        labs(x = "", y = "") +
+  guides(fill = FALSE) +
+  scale_fill_manual(values = cb_palette)
+  
+```
+
+We can see there are some issues with response rates from `hh_nr`, `party_r`, and `vpp_12`. 
+
+
+#### 4.3 Review Process
+
+### 5. Encode Algorithms
+
+#### 5.1 Develop Algorithms
+
+```{r}
+set.seed(420)
+
+voter_split <- voters_tbl %>%
+  mutate(response = factor(response, levels = c(0, 1))) %>%
+  initial_split(prop = 0.80)
+
+train_tbl <- training(voter_split)
+test_tbl <- testing(voter_split)
+```
+
+Since we will be using h2o automl, there is very little pre-processing we need to do. We will just feed our training data to the modeling function and h2o will do the rest. 
+
+```{r}
+# Modeling ----
+
+# to prevent re-running during knitting
+run_automl <- FALSE
+
+# iniitalize h2o cluster
+h2o.init()
+
+if (run_automl) {
+  
+  train_h2o <- as.h2o(train_tbl)
+  test_h2o  <- as.h2o(test_tbl) 
+  
+  y <- "response"
+  x <- setdiff(names(train_h2o), y)
+  
+  automl_models_h2o <- h2o.automl(
+    x = x,
+    y = y,
+    training_frame = train_h2o,
+    max_runtime_secs = 60,
+    nfolds = 10
+  )
+  
+  automl_models_h2o@leaderboard %>%
+    as.tibble()
+  
+}
+
+```
+
+```{r}
+extract_h2o_model_name_by_position <- function(h2o_leaderboard, n = 1, verbose = TRUE) {
+  
+  model_name <- h2o_leaderboard %>%
+    as_tibble() %>%
+    slice(n) %>%
+    pull(model_id)
+  
+  if (verbose) message(model_name)
+  
+  return(model_name)
+}
+
+# save model by position if automl is run
+if (run_automl) {
+  
+  # update this based on leaderboard
+  model_position <- 2
+  
+  automl_models_h2o@leaderboard %>%
+    extract_h2o_model_name_by_position(model_position) %>%
+    h2o.getModel() %>%
+    h2o.saveModel(path = "h2o_models/")
+  
+}
+
+```
+
+We will evaluate a model created on a previous run. 
+
+```{r}
+h2o_gbm <- h2o.loadModel("h2o_models/GBM_grid_0_AutoML_20190710_200311_model_4")
+```
+
+In viewing the performance metrics, we see an AUC of 0.88, which means our model is doing a decent job of separating positive instances from negative ones. 
+
+```{r}
+performance_h2o <- h2o.performance(h2o_gbm, newdata = as.h2o(test_tbl))
+
+performance_h2o
+```
+
+To get a better understanding of performance, we will look at the gain and lift charts of our model. 
+
+**Gain**
+
+```{r}
+performance_h2o <- h2o.performance(h2o_gbm, newdata = as.h2o(test_tbl))
+
+gain_lift_tbl <- performance_h2o %>%
+  h2o.gainsLift() %>%
+  as.tibble()
+
+gain_transformed_tbl <- gain_lift_tbl %>%
+  select(group, cumulative_data_fraction, cumulative_capture_rate, cumulative_lift) %>%
+  select(-contains("lift")) %>%
+  mutate(baseline = cumulative_data_fraction) %>%
+  rename(gain = cumulative_capture_rate)
+
+p1 <- gain_transformed_tbl %>%
+  ggplot(aes(x = cumulative_data_fraction, y = gain)) +
+  geom_line() +
+  geom_point(alpha = 1/3) +
+  geom_abline(slope = 1, linetype = "dashed", color = "grey") +
+  scale_y_continuous(limits = c(0,1)) + 
+  labs(
+    title = "Gain Chart",
+    subtitle = "GBM Model",
+    x = "Percentage of Samples",
+    y = "Percentage of Response"
+  )
+```
+
+**Lift**
+
+```{r}
+lift_transformed_tbl <- gain_lift_tbl %>%
+  select(group, cumulative_data_fraction, cumulative_capture_rate, cumulative_lift) %>%
+  select(-contains("capture")) %>%
+  rename(lift = cumulative_lift)
+
+p2 <- lift_transformed_tbl %>%
+  ggplot(aes(x = cumulative_data_fraction, y = lift)) +
+  geom_line() +
+  geom_point(alpha = 1/3) +
+  #geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", color = "grey") +
+  labs(
+    title = "Lift Chart",
+    subtitle = "GBM Model",
+    x = "Percentage of Samples",
+    y = "Lift"
+  )
+```
+
+Our charts indicate good initial performance. The lift chart shows we get over a 2x increase in responses in the first 25% of our test set. Our model appears to be correctly finding the responsers. 
+
+However, we will be interested to see our improvement when we rank voters by their ability to be influenced by a flyer. It is possible many of these voters would have responded without any targeting. 
+
+```{r}
+plot_grid(p1, p2, labels = c('', ''), label_size = 12)
+```
+
+#### 5.2 Quantify Financial Value Potential
+
+We see that our model in general works pretty well at predicting who will respond to the flyer. However, our goal is to find the voters most likely to be influenced by the flyer and then target the top 10% of them. We will focus on this group to quantify the financial value. 
+
+To do this, we will generate predictions for the test set after toggling the flyer variable off (indicating probabilty to vote without a flyer) and then do the same after toggling the flyer variable on (indicating probability to vote after getting targeted). Lastly, we will take the difference (`p(flyer ==1) - p(flyer==0)`) as the predicted influence (uplift) the flyer will have on the voter. 
+
+We can then rank the voters that recevied the flyer by their uplift and see how many responders we capture in the top 10%. This will be our estimate for calculating the financial gain and performance of the model. 
+
+```{r}
+# original predictions
+predictions_tbl <- h2o.predict(h2o_gbm, newdata = as.h2o(test_tbl)) %>%
+  as.tibble() 
+
+# predictions if no one got a flyer
+no_flyer_predictions_tbl <- h2o.predict(h2o_gbm, newdata = as.h2o(test_tbl %>% mutate(flyer = 0))) %>%
+      as.tibble()
+
+# predictions if everyone got a flyer
+flyer_predictions_tbl <- h2o.predict(h2o_gbm, newdata = as.h2o(test_tbl %>% mutate(flyer = 1))) %>%
+      as.tibble()
+
+# join predictions
+uplift_tbl <- bind_cols(predictions_tbl, flyer_predictions_tbl, no_flyer_predictions_tbl, test_tbl) %>%
+  rename(
+    flyer_prob = p11,
+    no_flyer_prob = p12
+  ) %>%
+  # calculate expected uplift
+  mutate(uplift = flyer_prob - no_flyer_prob,
+         added_votes = as.integer(predict1) - as.integer(predict2)) %>%
+  select(response, flyer_prob, no_flyer_prob, flyer, uplift, added_votes) %>%
+  # sort by highest uplift
+  arrange(-uplift) %>%
+  # filter for those that received the flyer
+  filter(flyer == "1")
+```
+
+We see that we have a new estimated response rate of 66% in the top 10% of uplift-ranked voters. Our initial control group was 34% and our randomized test send was about 40%. The targeted model shows an improvement of about `r round(.66 / .344, 2)`x over the control group and `r round(.66 / .4, 2)`x over the initial test group in response rates. 
+
+```{r}
+targeted_reponse <- uplift_tbl %>%  
+  # top 10% of records
+  top_n(ceiling(nrow(.) * .1), uplift) %>%
+  summarize(sends = n(),
+            response_rate = mean(response == "1"))
+
+targeted_reponse
+```
+
+#### 5.3 Improve Decision-Making via Recommendation Algorithm
+
+For this business case, we improve decision-making by scoring the full database of voters and targeting the top 100,000 for the next flyer campaign. 
+
+## Operationalize
+
+### 6. Measure Results
+
+#### 6.1 Capture Outcomes
+
+We apply the outcomes of our uplift model to find the performance increase over the initial flyer group. Additionally, we re-calculate our cost per vote KPI, determine the added number of expected votes, and estimate our cost savings based on the number of expected added votes. 
+
+```{r}
+# number of flyers for next campagin
+campaign_flyers_n = 100000
+
+uplift_diff <- targeted_reponse$response_rate - mean(flyer_group$response)
+
+uplift_flyer_cpv <-  calculate_cpv(campaign_flyers_n, 
+                                   uplift_diff) %>% round(2)
+
+flyer_cpv_decrease <- 
+  ((flyer_cpv - uplift_flyer_cpv) / flyer_cpv) %>% round(2)
+
+flyer_cpv_savings <- 
+  uplift_diff * campaign_flyers_n * (flyer_cpv - uplift_flyer_cpv) %>%
+  as.integer()
+
+print(glue("Flyer Baseline Cost Per Vote: ${flyer_cpv}"))
+print(glue("Targeted Flyer Cost Per Vote: ${uplift_flyer_cpv}"))
+print(glue("Targeted Flyer Added Votes: {uplift_diff * campaign_flyers_n}"))
+print(glue("Targeted Flyer Estimated Cost Savings: ${flyer_cpv_savings}"))
+print(glue("Targeted Flyer Cost Decrease: {abs(flyer_cpv_decrease * 100)}%"))
+```
+
+#### 6.2 Synthethize Results
+
+Our targeted-uplift model shows a strong increase in performance over randomly distributing flyers. We see an improvement of 77% in our initial KPI while adding approximately 25,000 votes over a random send. 
+
+#### 6.3 Visualize Outcomes
+
+```{r}
+outcomes_tbl <- tibble(
+  method = c("Random", "Targeted"), 
+  cost_per_vote = c(flyer_cpv, uplift_flyer_cpv)
+)
+
+outcomes_tbl %>%
+  ggplot(aes(method, cost_per_vote, 
+             fill = method, label = cost_per_vote)) +
+  geom_col() +
+  geom_label(vjust = 1, fill = "white") +
+  labs(
+    title = glue("Targeted Uplift Ranking: ",
+                 "{abs(flyer_cpv_decrease * 100)}% cost per vote decrease"),
+    x = "Flyer Sendout Method",
+    y = "Cost Per Vote ($)",
+    caption = "Source: Advanced Analytics Team"
+  ) +
+  ylim(0, 40) +
+  guides(fill = F) +
+  scale_fill_manual(values = c(cb_palette[1], cb_palette[4]))
+```
+
+### 7. Report Financial Impact
+
+#### 7.1 Measure Actual Results
+
+To measure our actual results, we would need to actually target 100,000 voters with the model and compare the performance of responses. 
+
+#### 7.2 Quantify Financial Benefit
+
+At our original cost per vote, those added votes also show an expected financial value of close to $700k generated by our model. 
+
+#### 7.3 Report Financial Benefit to Stakeholders
+
+We will want to share the initial findings with our stakeholders as well as report on the actual performance of the next campaign. These early findings should be promising to our stakeholders. 
+
+
+
